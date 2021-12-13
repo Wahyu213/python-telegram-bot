@@ -1393,7 +1393,7 @@ class _HasProtectedContent(MessageFilter):
         return bool(message.has_protected_content)
 
 
-HAS_PROTECTED_CONTENT = _HasProtectedContent(name='Filters.has_protected_content')
+HAS_PROTECTED_CONTENT = _HasProtectedContent(name='filters.HAS_PROTECTED_CONTENT')
 """Messages that contain :attr:`telegram.Message.has_protected_content`.
 
     .. versionadded:: 13.9
@@ -1418,7 +1418,7 @@ class _IsAutomaticForward(MessageFilter):
         return bool(message.is_automatic_forward)
 
 
-IS_AUTOMATIC_FORWARD = _IsAutomaticForward(name='Filters.is_automatic_forward')
+IS_AUTOMATIC_FORWARD = _IsAutomaticForward(name='filters.IS_AUTOMATIC_FORWARD')
 """Messages that contain :attr:`telegram.Message.is_automatic_forward`.
 
     .. versionadded:: 13.9
@@ -1591,9 +1591,9 @@ class SenderChat(_ChatUserBaseFilter):
         so when your bot is an admin in a channel and the linked discussion group, you would
         receive the message twice (once from inside the channel, once inside the discussion
         group). Since v13.9, the field :attr:`telegram.Message.is_automatic_forward` will be
-            :obj:`True` for the discussion group message.
+        :obj:`True` for the discussion group message.
 
-            .. seealso:: :attr:`Filters.is_automatic_forward`
+    .. seealso:: :attr:`telegram.ext.filters.IS_AUTOMATIC_FORWARD`
 
     Warning:
         :attr:`chat_ids` will return a *copy* of the saved chat ids as :obj:`frozenset`. This
