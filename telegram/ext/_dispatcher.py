@@ -17,27 +17,27 @@
 # You should have received a copy of the GNU Lesser Public License
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains the Dispatcher class."""
+import asyncio
 import inspect
 import logging
-import weakref
+from asyncio import Event
 from collections import defaultdict
 from pathlib import Path
-from queue import Empty, Queue
-from threading import BoundedSemaphore, Event, Lock, Thread, current_thread
-from time import sleep
+from threading import Lock
 from typing import (
     Callable,
     DefaultDict,
     Dict,
     List,
     Optional,
-    Set,
     Union,
     Generic,
     TypeVar,
     TYPE_CHECKING,
+    Coroutine,
+    Sequence,
+    Any,
 )
-from uuid import uuid4
 
 from telegram import Update
 from telegram.error import TelegramError
@@ -46,8 +46,7 @@ from telegram.ext._handler import Handler
 from telegram.ext._callbackdatacache import CallbackDataCache
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
 from telegram._utils.warnings import warn
-from telegram.ext._utils.promise import Promise
-from telegram.ext._utils.types import CCT, UD, CD, BD, BT, JQ, PT
+from telegram.ext._utils.types import CCT, UD, CD, BD, BT, JQ, PT, HandlerCallback
 from telegram.ext._utils.stack import was_called_by
 
 if TYPE_CHECKING:
@@ -56,7 +55,11 @@ if TYPE_CHECKING:
 
 DEFAULT_GROUP: int = 0
 
-UT = TypeVar('UT')
+_UT = TypeVar('_UT')
+_PooledRT = TypeVar('_PooledRT')
+_STOP_SIGNAL = object()
+
+_logger = logging.getLogger(__name__)
 
 
 class DispatcherHandlerStop(Exception):
@@ -102,7 +105,8 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
     Attributes:
         bot (:class:`telegram.Bot`): The bot object that should be passed to the handlers.
-        update_queue (:obj:`Queue`): The synchronized queue that will contain the updates.
+        update_queue (:class:`asyncio.Queue`): The synchronized queue that will contain the
+            updates.
         job_queue (:class:`telegram.ext.JobQueue`): Optional. The :class:`telegram.ext.JobQueue`
             instance to pass onto handler callbacks.
         workers (:obj:`int`, optional): Number of maximum concurrent worker threads for the
@@ -112,10 +116,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         bot_data (:obj:`dict`): A dictionary handlers can use to store data for the bot.
         persistence (:class:`telegram.ext.BasePersistence`): Optional. The persistence class to
             store data that should be persistent over restarts.
-        exception_event (:class:`threading.Event`): When this event is set, the dispatcher will
-            stop processing updates. If this dispatcher is used together with an
-            :class:`telegram.ext.Updater`, then this event will be the same object as
-            :attr:`telegram.ext.Updater.exception_event`.
         handlers (Dict[:obj:`int`, List[:class:`telegram.ext.Handler`]]): A dictionary mapping each
             handler group to the list of handlers registered to that group.
 
@@ -138,8 +138,9 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
     """
 
-    # Allowing '__weakref__' creation here since we need it for the singleton
+    # Allowing '__weakref__' creation here since we need it for the JobQueue
     __slots__ = (
+        '__weakref__',
         'workers',
         'persistence',
         'update_queue',
@@ -152,30 +153,24 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         'groups',
         'error_handlers',
         'running',
-        '__stop_event',
-        'exception_event',
-        '__async_queue',
-        '__async_threads',
+        '__pool_semaphore',
+        '__run_asyncio_task_counter',
+        '__run_asyncio_task_condition',
+        '__update_fetcher_task',
         'bot',
-        '__weakref__',
         'context_types',
+        'process_asyncio',
     )
-
-    __singleton_lock = Lock()
-    __singleton_semaphore = BoundedSemaphore()
-    __singleton = None
-    logger = logging.getLogger(__name__)
 
     def __init__(
         self: 'Dispatcher[BT, CCT, UD, CD, BD, JQ, PT]',
         *,
         bot: BT,
-        update_queue: Queue,
+        update_queue: asyncio.Queue,
         job_queue: JQ,
         workers: int,
         persistence: PT,
         context_types: ContextTypes[CCT, UD, CD, BD],
-        exception_event: Event,
         stack_level: int = 4,
     ):
         if not was_called_by(
@@ -191,7 +186,10 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         self.job_queue = job_queue
         self.workers = workers
         self.context_types = context_types
-        self.exception_event = exception_event
+        self.process_asyncio = False
+
+        if self.job_queue:
+            self.job_queue.set_dispatcher(self)
 
         if self.workers < 1:
             warn(
@@ -246,19 +244,22 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         self.groups: List[int] = []
         self.error_handlers: Dict[Callable, Union[bool, DefaultValue]] = {}
 
+        # A number of low-level helpers for the internal logic
         self.running = False
-        self.__stop_event = Event()
-        self.__async_queue: Queue = Queue()
-        self.__async_threads: Set[Thread] = set()
+        self.__pool_semaphore = asyncio.BoundedSemaphore(value=self.workers)
+        self.__update_fetcher_task: Optional[asyncio.Task] = None
+        self.__run_asyncio_task_counter = 0
+        self.__run_asyncio_task_condition = asyncio.Condition()
 
-        # For backward compatibility, we allow a "singleton" mode for the dispatcher. When there's
-        # only one instance of Dispatcher, it will be possible to use the `run_async` decorator.
-        with self.__singleton_lock:
-            # pylint: disable=consider-using-with
-            if self.__singleton_semaphore.acquire(blocking=False):
-                self._set_singleton(self)
-            else:
-                self._set_singleton(None)
+    async def __increment_run_asyncio_task_counter(self) -> None:
+        async with self.__run_asyncio_task_condition:
+            self.__run_asyncio_task_counter += 1
+
+    async def __decrement_run_asyncio_task_counter(self) -> None:
+        async with self.__run_asyncio_task_condition:
+            self.__run_asyncio_task_counter -= 1
+            if self.__run_asyncio_task_counter <= 0:
+                self.__run_asyncio_task_condition.notify_all()
 
     @staticmethod
     def builder() -> 'InitDispatcherBuilder':
@@ -271,75 +272,62 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
         return DispatcherBuilder()
 
-    def _init_async_threads(self, base_name: str, workers: int) -> None:
-        base_name = f'{base_name}_' if base_name else ''
+    async def __pooled_wrapper(
+        self,
+        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
+        args: Sequence[object],
+        kwargs: Dict[str, object],
+        update: Optional[object],
+    ) -> Optional[_PooledRT]:
+        # Use the semaphore to throttle the number of tasks running in parallel
+        async with self.__pool_semaphore:
+            try:
+                return await self._pooled(func=func, args=args, kwargs=kwargs, update=update)
+            finally:
+                await self.__decrement_run_asyncio_task_counter()
 
-        for i in range(workers):
-            thread = Thread(target=self._pooled, name=f'Bot:{self.bot.id}:worker:{base_name}{i}')
-            self.__async_threads.add(thread)
-            thread.start()
+    async def _pooled(
+        self,
+        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
+        args: Sequence[object],
+        kwargs: Dict[str, object],
+        update: Optional[object],
+    ) -> Optional[_PooledRT]:
+        try:
+            result = await func(*args, **kwargs)
 
-    @classmethod
-    def _set_singleton(cls, val: Optional['Dispatcher']) -> None:
-        cls.logger.debug('Setting singleton dispatcher as %s', val)
-        cls.__singleton = weakref.ref(val) if val else None
+            self.update_persistence(update=update)
+            return result
 
-    @classmethod
-    def get_instance(cls) -> 'Dispatcher':
-        """Get the singleton instance of this class.
-
-        Returns:
-            :class:`telegram.ext.Dispatcher`
-
-        Raises:
-            RuntimeError
-
-        """
-        if cls.__singleton is not None:
-            return cls.__singleton()  # type: ignore[return-value] # pylint: disable=not-callable
-        raise RuntimeError(f'{cls.__name__} not initialized or multiple instances exist')
-
-    def _pooled(self) -> None:
-        thr_name = current_thread().name
-        while 1:
-            promise = self.__async_queue.get()
-
-            # If unpacking fails, the thread pool is being closed from Updater._join_async_threads
-            if not isinstance(promise, Promise):
-                self.logger.debug(
-                    "Closing run_async thread %s/%d", thr_name, len(self.__async_threads)
-                )
-                break
-
-            promise.run()
-
-            if not promise.exception:
-                self.update_persistence(update=promise.update)
-                continue
-
-            if isinstance(promise.exception, DispatcherHandlerStop):
+        except Exception as exception:
+            if isinstance(exception, DispatcherHandlerStop):
                 warn(
                     'DispatcherHandlerStop is not supported with async functions; '
-                    f'func: {promise.pooled_function.__name__}',
+                    f'func: {func.__qualname__}',
                 )
-                continue
+                return None
 
             # Avoid infinite recursion of error handlers.
-            if promise.pooled_function in self.error_handlers:
-                self.logger.exception(
+            if func in self.error_handlers:
+                _logger.exception(
                     'An error was raised and an uncaught error was raised while '
                     'handling the error with an error_handler.',
-                    exc_info=promise.exception,
+                    exc_info=exception,
                 )
-                continue
+                return None
 
-            # If we arrive here, an exception happened in the promise and was neither
+            # If we arrive here, an exception happened in the task and was neither
             # DispatcherHandlerStop nor raised by an error handler. So we can and must handle it
-            self.dispatch_error(promise.update, promise.exception, promise=promise)
+            await self.dispatch_error(update, exception, asyncio_args=args, asyncio_kwargs=kwargs)
+            return None
 
-    def run_async(
-        self, func: Callable[..., object], *args: object, update: object = None, **kwargs: object
-    ) -> Promise:
+    async def run_asyncio(
+        self,
+        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
+        *args: object,
+        update: object = None,
+        **kwargs: object,
+    ) -> 'asyncio.Task[Optional[_PooledRT]]':
         """
         Queue a function (with given args/kwargs) to be run asynchronously. Exceptions raised
         by the function will be handled by the error handlers registered with
@@ -363,102 +351,111 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             Promise
 
         """
-        promise = Promise(func, args, kwargs, update=update)
-        self.__async_queue.put(promise)
-        return promise
+        task = asyncio.create_task(
+            self.__pooled_wrapper(func=func, args=args, kwargs=kwargs, update=update)
+        )
 
-    def start(self, ready: Event = None) -> None:
+        # Keep a track of how many tasks are running so that we can wait for them to finish
+        # on shutdown
+        await self.__increment_run_asyncio_task_counter()
+
+        return task
+
+    async def start(self, ready: Event = None) -> None:
         """Thread target of thread 'dispatcher'.
 
         Runs in background and processes the update queue. Also starts :attr:`job_queue`, if set.
 
         Args:
-            ready (:obj:`threading.Event`, optional): If specified, the event will be set once the
+            ready (:obj:`asyncio.Event`, optional): If specified, the event will be set once the
                 dispatcher is ready.
 
         """
         if self.running:
-            self.logger.warning('already running')
+            _logger.warning('already running')
             if ready is not None:
                 ready.set()
             return
 
-        if self.exception_event.is_set():
-            msg = 'reusing dispatcher after exception event is forbidden'
-            self.logger.error(msg)
-            raise TelegramError(msg)
+        await self.bot.initialize()
+
+        self.__update_fetcher_task = asyncio.create_task(
+            self._update_fetcher(), name=f'Dispatcher:{self.bot.id}:update_fetcher'
+        )
+        self.running = True
+        _logger.debug('Dispatcher started')
 
         if self.job_queue:
             self.job_queue.start()
-        self._init_async_threads(str(uuid4()), self.workers)
-        self.running = True
-        self.logger.debug('Dispatcher started')
+            _logger.debug('JobQueue started')
 
         if ready is not None:
             ready.set()
 
-        while 1:
-            try:
-                # Pop update from update queue.
-                update = self.update_queue.get(True, 1)
-            except Empty:
-                if self.__stop_event.is_set():
-                    self.logger.debug('orderly stopping')
-                    break
-                if self.exception_event.is_set():
-                    self.logger.critical('stopping due to exception in another thread')
-                    break
-                continue
-
-            self.logger.debug('Processing Update: %s', update)
-            self.process_update(update)
-            self.update_queue.task_done()
-
-        self.running = False
-        self.logger.debug('Dispatcher thread stopped')
-
-    def stop(self) -> None:
-        """Stops the thread and :attr:`job_queue`, if set.
-        Also calls :meth:`update_persistence` and :meth:`BasePersistence.flush` on
+    async def stop(self) -> None:
+        """Stops the process after processing any pending updates or tasks created by
+        :meth:`run_asyncio`. Also stops :attr:`job_queue`, if set.
+        Finally, calls :meth:`update_persistence` and :meth:`BasePersistence.flush` on
         :attr:`persistence`, if set.
+
+        Warning:
+            Once this method is called, no more updates will be fetched from :attr:`update_queue`,
+            even if it's not empty.
         """
+        # Only relevant if the dispatcher is running
         if self.running:
-            self.__stop_event.set()
-            while self.running:
-                sleep(0.1)
-            self.__stop_event.clear()
 
-        # async threads must be join()ed only after the dispatcher thread was joined,
-        # otherwise we can still have new async threads dispatched
-        threads = list(self.__async_threads)
-        total = len(threads)
+            # Stop listening for new updates and handle all pending ones
+            await self.update_queue.put(_STOP_SIGNAL)
+            if self.__update_fetcher_task:
+                await self.__update_fetcher_task
+            _logger.debug("Dispatcher stopped fetching of updates.")
 
-        # Stop all threads in the thread pool by put()ting one non-tuple per thread
-        for i in range(total):
-            self.__async_queue.put(None)
+            # Wait for pending `run_asyncio` tasks
+            async with self.__run_asyncio_task_condition:
+                if self.__run_asyncio_task_counter > 0:
+                    _logger.debug('Waiting for `run_asyncio` calls to be processed')
+                    await self.__run_asyncio_task_condition.wait()
 
-        for i, thr in enumerate(threads):
-            self.logger.debug('Waiting for async thread %s/%s to end', i + 1, total)
-            thr.join()
-            self.__async_threads.remove(thr)
-            self.logger.debug('async thread %s/%s has ended', i + 1, total)
+            self.running = False
 
-        if self.job_queue:
-            self.job_queue.stop()
-            self.logger.debug('JobQueue was shut down.')
-
+        # Things that need to be done even if `start()` was not called
         self.update_persistence()
         if self.persistence:
             self.persistence.flush()
+            _logger.debug('Updated and flushed persistence')
 
-        # Clear the connection pool
-        self.bot.request.stop()
+        if self.job_queue:
+            _logger.debug('Waiting for running jobs to finish')
+            self.job_queue.stop(wait=True)
+            _logger.debug('JobQueue stopped')
 
-    @property
-    def has_running_threads(self) -> bool:  # skipcq: PY-D0003
-        return self.running or bool(self.__async_threads)
+        # Shut down the bot
+        await self.bot.shutdown()
 
-    def process_update(self, update: object) -> None:
+    async def _update_fetcher(self) -> None:
+        # Continuously fetch updates from the queue. Exit only once the signal object is found.
+        while True:
+            try:
+                update = await self.update_queue.get()
+
+                if update is _STOP_SIGNAL:
+                    return
+
+                _logger.debug('Processing update %s', update)
+
+                if self.process_asyncio:
+                    asyncio.create_task(self.__process_update_wrapper(update))
+                else:
+                    await self.__process_update_wrapper(update)
+            except Exception as exc:
+                _logger.exception('updater fetcher got exeception', exc_info=exc)
+
+    async def __process_update_wrapper(self, update: object) -> None:
+        await self.process_update(update)
+        self.update_queue.task_done()
+
+    async def process_update(self, update: object) -> None:
         """Processes a single update and updates the persistence.
 
         Note:
@@ -473,9 +470,14 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 The update to process.
 
         """
+        # Use the semaphore to throttle the number of tasks running in parallel
+        async with self.__pool_semaphore:
+            return await self.__process_update(update)
+
+    async def __process_update(self, update: object) -> None:
         # An error happened while polling
         if isinstance(update, TelegramError):
-            self.dispatch_error(None, update)
+            await self.dispatch_error(None, update)
             return
 
         context = None
@@ -492,19 +494,19 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                             context.refresh_data()
                         handled = True
                         sync_modes.append(handler.run_async)
-                        handler.handle_update(update, self, check, context)
+                        await handler.handle_update(update, self, check, context)
                         break
 
             # Stop processing with any other handler.
             except DispatcherHandlerStop:
-                self.logger.debug('Stopping further handlers due to DispatcherHandlerStop')
+                _logger.debug('Stopping further handlers due to DispatcherHandlerStop')
                 self.update_persistence(update=update)
                 break
 
             # Dispatch any error.
             except Exception as exc:
-                if self.dispatch_error(update, exc):
-                    self.logger.debug('Error handler stopped further handlers.')
+                if await self.dispatch_error(update, exc):
+                    _logger.debug('Error handler stopped further handlers.')
                     break
 
         # Update persistence, if handled
@@ -521,7 +523,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             if not handled_only_async:
                 self.update_persistence(update=update)
 
-    def add_handler(self, handler: Handler[UT, CCT], group: int = DEFAULT_GROUP) -> None:
+    def add_handler(self, handler: Handler[_UT, CCT], group: int = DEFAULT_GROUP) -> None:
         """Register a handler.
 
         TL;DR: Order and priority counts. 0 or 1 handlers per group will be used. End handling of
@@ -648,7 +650,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
     def add_error_handler(
         self,
-        callback: Callable[[object, CCT], None],
+        callback: HandlerCallback[object, CCT, None],
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ) -> None:
         """Registers an error handler in the Dispatcher. This handler will receive every error
@@ -661,13 +663,13 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         Args:
             callback (:obj:`callable`): The callback function for this error handler. Will be
                 called when an error is raised. Callback signature:
-                ``def callback(update: Update, context: CallbackContext)``.
+                ``def callback(update: object, context: CallbackContext)``.
                 The error that happened will be present in ``context.error``.
             run_async (:obj:`bool`, optional): Whether this handlers callback should be run
                 asynchronously using :meth:`run_async`. Defaults to :obj:`False`.
         """
         if callback in self.error_handlers:
-            self.logger.debug('The callback is already registered as an error handler. Ignoring.')
+            _logger.warning('The callback is already registered as an error handler. Ignoring.')
             return
 
         if (
@@ -689,12 +691,13 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         """
         self.error_handlers.pop(callback, None)
 
-    def dispatch_error(
+    async def dispatch_error(
         self,
         update: Optional[object],
         error: Exception,
-        promise: Promise = None,
         job: 'Job' = None,
+        asyncio_args: Sequence[object] = None,
+        asyncio_kwargs: Dict[str, object] = None,
     ) -> bool:
         """Dispatches an error by passing it to all error handlers registered with
         :meth:`add_error_handler`. If one of the error handlers raises
@@ -721,8 +724,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             :obj:`bool`: :obj:`True` if one of the error handlers raised
                 :class:`telegram.ext.DispatcherHandlerStop`. :obj:`False`, otherwise.
         """
-        async_args = None if not promise else promise.args
-        async_kwargs = None if not promise else promise.kwargs
 
         if self.error_handlers:
             for (
@@ -733,26 +734,24 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                     update=update,
                     error=error,
                     dispatcher=self,
-                    async_args=async_args,
-                    async_kwargs=async_kwargs,
+                    async_args=asyncio_args,
+                    async_kwargs=asyncio_kwargs,
                     job=job,
                 )
                 if run_async:
-                    self.run_async(callback, update, context, update=update)
+                    await self.run_asyncio(callback, update, context, update=update)
                 else:
                     try:
-                        callback(update, context)
+                        await callback(update, context)
                     except DispatcherHandlerStop:
                         return True
                     except Exception as exc:
-                        self.logger.exception(
+                        _logger.exception(
                             'An error was raised and an uncaught error was raised while '
                             'handling the error with an error_handler.',
                             exc_info=exc,
                         )
             return False
 
-        self.logger.exception(
-            'No error handlers are registered, logging exception.', exc_info=error
-        )
+        _logger.exception('No error handlers are registered, logging exception.', exc_info=error)
         return False

@@ -26,7 +26,7 @@ from threading import Event
 
 import pytest
 
-from telegram.request import Request
+from telegram.request._httpxrequest import HTTPXRequest
 from .conftest import PRIVATE_KEY
 
 from telegram.ext import (
@@ -140,24 +140,21 @@ class TestBuilder:
         if isinstance(obj, Updater):
             assert obj.dispatcher.bot is bot
             assert obj.dispatcher.job_queue.dispatcher is obj.dispatcher
-            assert obj.exception_event is obj.dispatcher.exception_event
 
     def test_build_custom_dispatcher(self, dp):
         updater = UpdaterBuilder().dispatcher(dp).build()
         assert updater.dispatcher is dp
         assert updater.bot is updater.dispatcher.bot
-        assert updater.exception_event is dp.exception_event
 
     def test_build_no_dispatcher(self, bot):
         updater = UpdaterBuilder().dispatcher(None).token(bot.token).build()
         assert updater.dispatcher is None
         assert updater.bot.token == bot.token
-        assert updater.bot.request.con_pool_size == 8
-        assert isinstance(updater.exception_event, Event)
+        assert updater.bot.request.connection_pool_size == 8
 
     def test_all_bot_args_custom(self, builder, bot):
         defaults = Defaults()
-        request = Request(8)
+        request = HTTPXRequest(connection_pool_size=8)
         builder.token(bot.token).base_url('base_url').base_file_url('base_file_url').private_key(
             PRIVATE_KEY
         ).defaults(defaults).arbitrary_callback_data(42).request(request)
@@ -175,7 +172,7 @@ class TestBuilder:
         built_bot = builder.build().bot
 
         assert built_bot.token == bot.token
-        assert built_bot.request._connect_timeout == 42
+        assert built_bot.request._client.timeout.connect == 42
 
     def test_all_dispatcher_args_custom(self, dp):
         builder = DispatcherBuilder()
@@ -183,14 +180,13 @@ class TestBuilder:
         job_queue = JobQueue()
         persistence = PicklePersistence('filename')
         context_types = ContextTypes()
-        builder.bot(dp.bot).update_queue(dp.update_queue).exception_event(
-            dp.exception_event
-        ).job_queue(job_queue).persistence(persistence).context_types(context_types).workers(3)
+        builder.bot(dp.bot).update_queue(dp.update_queue).job_queue(job_queue).persistence(
+            persistence
+        ).context_types(context_types).workers(3)
         dispatcher = builder.build()
 
         assert dispatcher.bot is dp.bot
         assert dispatcher.update_queue is dp.update_queue
-        assert dispatcher.exception_event is dp.exception_event
         assert dispatcher.job_queue is job_queue
         assert dispatcher.job_queue.dispatcher is dispatcher
         assert dispatcher.persistence is persistence
@@ -202,7 +198,6 @@ class TestBuilder:
             UpdaterBuilder()
             .dispatcher(None)
             .bot(dp.bot)
-            .exception_event(dp.exception_event)
             .update_queue(dp.update_queue)
             .user_signal_handler(42)
             .build()
@@ -210,7 +205,6 @@ class TestBuilder:
 
         assert updater.dispatcher is None
         assert updater.bot is dp.bot
-        assert updater.exception_event is dp.exception_event
         assert updater.update_queue is dp.update_queue
         assert updater.user_signal_handler == 42
 
@@ -218,14 +212,14 @@ class TestBuilder:
         obj = builder.token(bot.token).workers(42).build()
         dispatcher = obj if isinstance(obj, Dispatcher) else obj.dispatcher
         assert dispatcher.workers == 42
-        assert dispatcher.bot.request.con_pool_size == 46
+        assert dispatcher.bot.request.connection_pool_size == 46
 
     def test_connection_pool_size_warning(self, bot, builder, recwarn):
-        builder.token(bot.token).workers(42).request_kwargs({'con_pool_size': 1})
+        builder.token(bot.token).workers(42).request_kwargs({'connection_pool_size': 1})
         obj = builder.build()
         dispatcher = obj if isinstance(obj, Dispatcher) else obj.dispatcher
         assert dispatcher.workers == 42
-        assert dispatcher.bot.request.con_pool_size == 1
+        assert dispatcher.bot.request.connection_pool_size == 1
 
         assert len(recwarn) == 1
         message = str(recwarn[-1].message)

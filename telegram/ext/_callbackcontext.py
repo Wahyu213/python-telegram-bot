@@ -18,7 +18,7 @@
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 # pylint: disable=no-self-use
 """This module contains the CallbackContext class."""
-from queue import Queue
+from asyncio import Queue
 from typing import (
     TYPE_CHECKING,
     Dict,
@@ -27,9 +27,9 @@ from typing import (
     NoReturn,
     Optional,
     Tuple,
-    Union,
     Generic,
     Type,
+    Sequence,
 )
 
 from telegram import Update, CallbackQuery
@@ -137,7 +137,7 @@ class CallbackContext(Generic[BT, UD, CD, BD]):
         self.matches: Optional[List[Match]] = None
         self.error: Optional[Exception] = None
         self.job: Optional['Job'] = None
-        self.async_args: Optional[Union[List, Tuple]] = None
+        self.async_args: Optional[Sequence[object]] = None
         self.async_kwargs: Optional[Dict[str, object]] = None
 
     @property
@@ -251,7 +251,7 @@ class CallbackContext(Generic[BT, UD, CD, BD]):
         update: object,
         error: Exception,
         dispatcher: 'Dispatcher[BT, CCT, UD, CD, BD, JQ, PT]',
-        async_args: Union[List, Tuple] = None,
+        async_args: Sequence[object] = None,
         async_kwargs: Dict[str, object] = None,
         job: 'Job' = None,
     ) -> 'CCT':
@@ -370,9 +370,9 @@ class CallbackContext(Generic[BT, UD, CD, BD]):
         return self._dispatcher.job_queue
 
     @property
-    def update_queue(self) -> Queue:
+    def update_queue(self) -> 'Queue[object]':
         """
-        :class:`queue.Queue`: The ``Queue`` instance used by the
+        :class:`asyncio.Queue`: The ``Queue`` instance used by the
             :class:`telegram.ext.Dispatcher` and (usually) the :class:`telegram.ext.Updater`
             associated with this context.
 

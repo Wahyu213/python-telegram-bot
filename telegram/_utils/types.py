@@ -64,3 +64,8 @@ as ``Union[DefaultValue, type]``."""
 RT = TypeVar("RT")
 SLT = Union[RT, List[RT], Tuple[RT, ...]]
 """Single instance or list/tuple of instances."""
+
+FieldTuple = Tuple[str, bytes, str]
+"""Alias for return type of `InputFile.field_tuple`."""
+UploadFileDict = Dict[str, FieldTuple]
+"""Dictionary containing file data to be uploaded to the API."""

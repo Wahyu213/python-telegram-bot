@@ -20,7 +20,6 @@
 import re
 from typing import (
     TYPE_CHECKING,
-    Callable,
     Match,
     Optional,
     Pattern,
@@ -33,7 +32,7 @@ from typing import (
 from telegram import Update
 from telegram.ext import Handler
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
-from telegram.ext._utils.types import CCT
+from telegram.ext._utils.types import CCT, HandlerCallback
 
 if TYPE_CHECKING:
     from telegram.ext import Dispatcher
@@ -85,7 +84,7 @@ class InlineQueryHandler(Handler[Update, CCT]):
 
     def __init__(
         self,
-        callback: Callable[[Update, CCT], RT],
+        callback: HandlerCallback[Update, CCT, RT],
         pattern: Union[str, Pattern] = None,
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
         chat_types: List[str] = None,

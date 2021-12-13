@@ -18,13 +18,13 @@
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains the CommandHandler and PrefixHandler classes."""
 import re
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, TypeVar, Union
 
 from telegram import MessageEntity, Update
 from telegram.ext import filters as filters_module, Handler
 from telegram._utils.types import SLT
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
-from telegram.ext._utils.types import CCT
+from telegram.ext._utils.types import CCT, HandlerCallback
 
 if TYPE_CHECKING:
     from telegram.ext import Dispatcher
@@ -85,7 +85,7 @@ class CommandHandler(Handler[Update, CCT]):
     def __init__(
         self,
         command: SLT[str],
-        callback: Callable[[Update, CCT], RT],
+        callback: HandlerCallback[Update, CCT, RT],
         filters: filters_module.BaseFilter = None,
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ):
@@ -230,7 +230,7 @@ class PrefixHandler(CommandHandler):
         self,
         prefix: SLT[str],
         command: SLT[str],
-        callback: Callable[[Update, CCT], RT],
+        callback: HandlerCallback[Update, CCT, RT],
         filters: filters_module.BaseFilter = None,
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ):

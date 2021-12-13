@@ -16,21 +16,38 @@
 #
 # You should have received a copy of the GNU Lesser Public License
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
+# pylint: disable=wrong-import-position,ungrouped-imports,wrong-import-order
 """This module contains the classes JobQueue and Job."""
 
 import datetime
 import weakref
-from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union, cast, overload
+from typing import TYPE_CHECKING, Optional, Tuple, Union, cast, overload
+
+# We apply a small hack here to make AsyncIOScheduler/Executor work with
+# class based callbacks. See https://github.com/agronholm/apscheduler/issues/583
+# We just override aps.util.iscoroutinefunction, which is an imported function in that module
+# For this to work, this must happen before any other import from APScheduler
+# This is also the reason for the plyint disable at the top of the file and the
+# flake8 setting in setup.cfg
+# TODO: 1. Check if this works if the user manually imports APS stuff before we get here
+#  2. Think about refactoring. `Job.__call__` was introduced in
+#     https://github.com/python-telegram-bot/python-telegram-bot/pull/2692
+#     but there are probably feasible alternatives.
+from telegram._utils.asyncio import is_coroutine_function
+from apscheduler import util
+
+util.iscoroutinefunction = is_coroutine_function
 
 import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.job import Job as APSJob
 
 from telegram._utils.types import JSONDict
 from telegram.ext._extbot import ExtBot
+from telegram.ext._utils.types import JobCallback
 
 if TYPE_CHECKING:
-    from telegram.ext import Dispatcher, CallbackContext
+    from telegram.ext import Dispatcher
     import apscheduler.job  # noqa: F401
 
 
@@ -39,7 +56,11 @@ class JobQueue:
     wrapper for the APScheduler library.
 
     Attributes:
-        scheduler (:class:`apscheduler.schedulers.background.BackgroundScheduler`): The APScheduler
+        scheduler (:class:`apscheduler.schedulers.asyncio.AsyncIOScheduler`): The scheduler.
+            ..versionchanged:: 14.0
+                Use :class:`apscheduler.schedulers.asyncio.AsyncIOScheduler` instead of
+                :class:`apscheduler.schedulers.background.BackgroundScheduler`
+
 
     """
 
@@ -47,7 +68,7 @@ class JobQueue:
 
     def __init__(self) -> None:
         self._dispatcher: 'Optional[weakref.ReferenceType[Dispatcher]]' = None
-        self.scheduler = BackgroundScheduler(timezone=pytz.utc)
+        self.scheduler = AsyncIOScheduler(timezone=pytz.utc)
 
     def _tz_now(self) -> datetime.datetime:
         return datetime.datetime.now(self.scheduler.timezone)
@@ -110,7 +131,7 @@ class JobQueue:
 
     def run_once(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         when: Union[float, datetime.timedelta, datetime.datetime, datetime.time],
         context: object = None,
         name: str = None,
@@ -173,7 +194,7 @@ class JobQueue:
 
     def run_repeating(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         interval: Union[float, datetime.timedelta],
         first: Union[float, datetime.timedelta, datetime.datetime, datetime.time] = None,
         last: Union[float, datetime.timedelta, datetime.datetime, datetime.time] = None,
@@ -268,7 +289,7 @@ class JobQueue:
 
     def run_monthly(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         when: datetime.time,
         day: int,
         context: object = None,
@@ -330,7 +351,7 @@ class JobQueue:
 
     def run_daily(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         time: datetime.time,
         days: Tuple[int, ...] = tuple(range(7)),
         context: object = None,
@@ -389,7 +410,7 @@ class JobQueue:
 
     def run_custom(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         job_kwargs: JSONDict,
         context: object = None,
         name: str = None,
@@ -425,10 +446,16 @@ class JobQueue:
         if not self.scheduler.running:
             self.scheduler.start()
 
-    def stop(self) -> None:
-        """Stops the thread."""
+    def stop(self, wait: bool = True) -> None:
+        """Shuts down the :class:`~telegram.ext.JobQueue`.
+
+        Args:
+            wait (:obj:`bool`, optional): Whether or not to wait until all currently running jobs
+                have finished. Defaults to :obj:`True`.
+
+        """
         if self.scheduler.running:
-            self.scheduler.shutdown()
+            self.scheduler.shutdown(wait=wait)
 
     def jobs(self) -> Tuple['Job', ...]:
         """Returns a tuple of all *scheduled* jobs that are currently in the :class:`JobQueue`."""
@@ -489,7 +516,7 @@ class Job:
 
     def __init__(
         self,
-        callback: Callable[['CallbackContext'], None],
+        callback: JobCallback,
         context: object = None,
         name: str = None,
         job: APSJob = None,
@@ -504,7 +531,7 @@ class Job:
 
         self.job = cast(APSJob, job)  # skipcq: PTC-W0052
 
-    def run(self, dispatcher: 'Dispatcher') -> None:
+    async def run(self, dispatcher: 'Dispatcher') -> None:
         """Executes the callback function independently of the jobs schedule. Also calls
         :meth:`telegram.ext.Dispatcher.update_persistence`.
 
@@ -516,16 +543,19 @@ class Job:
                 with.
         """
         try:
-            self.callback(dispatcher.context_types.context.from_job(self, dispatcher))
+            if is_coroutine_function(self.callback):
+                await self.callback(dispatcher.context_types.context.from_job(self, dispatcher))
+            else:
+                self.callback(dispatcher.context_types.context.from_job(self, dispatcher))
         except Exception as exc:
-            dispatcher.dispatch_error(None, exc, job=self)
+            await dispatcher.dispatch_error(None, exc, job=self)
         finally:
             dispatcher.update_persistence(None)
 
-    def __call__(self, dispatcher: 'Dispatcher') -> None:
+    async def __call__(self, dispatcher: 'Dispatcher') -> None:
         """Shortcut for::
 
-            job.run(dispatcher)
+            await job.run(dispatcher)
 
         Warning:
             The fact that jobs are callable should be considered an implementation detail and not
@@ -537,7 +567,7 @@ class Job:
             dispatcher (:class:`telegram.ext.Dispatcher`): The dispatcher this job is associated
                 with.
         """
-        self.run(dispatcher=dispatcher)
+        await self.run(dispatcher=dispatcher)
 
     def schedule_removal(self) -> None:
         """

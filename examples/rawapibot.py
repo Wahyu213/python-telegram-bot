@@ -11,7 +11,7 @@ from typing import NoReturn
 from time import sleep
 
 import telegram
-from telegram.error import NetworkError, Unauthorized
+from telegram.error import NetworkError, Forbidden
 
 
 UPDATE_ID = None
@@ -24,7 +24,7 @@ def main() -> NoReturn:
     bot = telegram.Bot('TOKEN')
 
     # get the first pending update_id, this is so we can skip over it in case
-    # we get an "Unauthorized" exception.
+    # we get an "Forbidden" exception.
     try:
         UPDATE_ID = bot.get_updates()[0].update_id
     except IndexError:
@@ -37,7 +37,7 @@ def main() -> NoReturn:
             echo(bot)
         except NetworkError:
             sleep(1)
-        except Unauthorized:
+        except Forbidden:
             # The user has removed or blocked the bot.
             UPDATE_ID += 1
 

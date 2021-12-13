@@ -50,7 +50,6 @@ from telegram.ext import (
     TypeHandler,
 )
 from telegram._utils.warnings import warn
-from telegram.ext._utils.promise import Promise
 from telegram.ext._utils.types import ConversationDict
 from telegram.ext._utils.types import CCT
 
@@ -655,7 +654,7 @@ class ConversationHandler(Handler[Update, CCT]):
 
         return key, handler, check  # type: ignore[return-value]
 
-    def handle_update(  # type: ignore[override]
+    async def handle_update(  # type: ignore[override]
         self,
         update: Update,
         dispatcher: 'Dispatcher',

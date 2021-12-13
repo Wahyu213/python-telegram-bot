@@ -21,8 +21,7 @@
 from typing import TYPE_CHECKING, Any, Optional, List
 
 from telegram import ShippingAddress, TelegramObject, User, ShippingOption
-from telegram._utils.defaultvalue import DEFAULT_NONE
-from telegram._utils.types import JSONDict, ODVInput
+from telegram._utils.types import JSONDict
 
 if TYPE_CHECKING:
     from telegram import Bot
@@ -87,12 +86,15 @@ class ShippingQuery(TelegramObject):
 
         return cls(bot=bot, **data)
 
-    def answer(  # pylint: disable=invalid-name
+    async def answer(  # pylint: disable=invalid-name
         self,
         ok: bool,
         shipping_options: List[ShippingOption] = None,
         error_message: str = None,
-        timeout: ODVInput[float] = DEFAULT_NONE,
+        read_timeout: float = None,
+        write_timeout: float = None,
+        connect_timeout: float = None,
+        pool_timeout: float = None,
         api_kwargs: JSONDict = None,
     ) -> bool:
         """Shortcut for::
@@ -103,11 +105,14 @@ class ShippingQuery(TelegramObject):
         :meth:`telegram.Bot.answer_shipping_query`.
 
         """
-        return self.get_bot().answer_shipping_query(
+        return await self.get_bot().answer_shipping_query(
             shipping_query_id=self.id,
             ok=ok,
             shipping_options=shipping_options,
             error_message=error_message,
-            timeout=timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            connect_timeout=connect_timeout,
+            pool_timeout=pool_timeout,
             api_kwargs=api_kwargs,
         )

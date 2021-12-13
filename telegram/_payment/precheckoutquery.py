@@ -21,8 +21,7 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 from telegram import OrderInfo, TelegramObject, User
-from telegram._utils.defaultvalue import DEFAULT_NONE
-from telegram._utils.types import JSONDict, ODVInput
+from telegram._utils.types import JSONDict
 
 if TYPE_CHECKING:
     from telegram import Bot
@@ -114,11 +113,14 @@ class PreCheckoutQuery(TelegramObject):
 
         return cls(bot=bot, **data)
 
-    def answer(  # pylint: disable=invalid-name
+    async def answer(  # pylint: disable=invalid-name
         self,
         ok: bool,
         error_message: str = None,
-        timeout: ODVInput[float] = DEFAULT_NONE,
+        read_timeout: float = None,
+        write_timeout: float = None,
+        connect_timeout: float = None,
+        pool_timeout: float = None,
         api_kwargs: JSONDict = None,
     ) -> bool:
         """Shortcut for::
@@ -129,10 +131,13 @@ class PreCheckoutQuery(TelegramObject):
         :meth:`telegram.Bot.answer_pre_checkout_query`.
 
         """
-        return self.get_bot().answer_pre_checkout_query(
+        return await self.get_bot().answer_pre_checkout_query(
             pre_checkout_query_id=self.id,
             ok=ok,
             error_message=error_message,
-            timeout=timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            connect_timeout=connect_timeout,
+            pool_timeout=pool_timeout,
             api_kwargs=api_kwargs,
         )

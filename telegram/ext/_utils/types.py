@@ -25,12 +25,41 @@ Warning:
     user. Changes to this module are not considered breaking changes and may not be documented in
     the changelog.
 """
-from typing import TypeVar, TYPE_CHECKING, Tuple, List, Dict, Any, Optional, Union
+from typing import (
+    TypeVar,
+    TYPE_CHECKING,
+    Tuple,
+    List,
+    Dict,
+    Any,
+    Optional,
+    Union,
+    Callable,
+    Coroutine,
+)
 
 if TYPE_CHECKING:
     from telegram.ext import CallbackContext, JobQueue, BasePersistence  # noqa: F401
     from telegram import Bot
 
+CCT = TypeVar('CCT', bound='CallbackContext')
+"""An instance of :class:`telegram.ext.CallbackContext` or a custom subclass.
+
+.. versionadded:: 13.6
+"""
+
+RT = TypeVar('RT')
+UT = TypeVar('UT')
+HandlerCallback = Callable[[UT, CCT], Union[Coroutine[Any, Any, RT], RT]]
+"""Type of a handler callback
+
+    .. versionadded:: 14.0
+"""
+JobCallback = Callable[[CCT], Union[Coroutine[Any, Any, Any], Any]]
+"""Type of a job callback
+
+    .. versionadded:: 14.0
+"""
 
 ConversationDict = Dict[Tuple[int, ...], Optional[object]]
 """Dict[Tuple[:obj:`int`, ...], Optional[:obj:`object`]]:
@@ -47,11 +76,6 @@ CDCData = Tuple[List[Tuple[str, float, Dict[str, Any]]], Dict[str, str]]
     .. versionadded:: 13.6
 """
 
-CCT = TypeVar('CCT', bound='CallbackContext')
-"""An instance of :class:`telegram.ext.CallbackContext` or a custom subclass.
-
-.. versionadded:: 13.6
-"""
 BT = TypeVar('BT', bound='Bot')
 """Type of the bot.
 

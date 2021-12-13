@@ -20,8 +20,7 @@
 from typing import TYPE_CHECKING
 
 from telegram import TelegramObject
-from telegram._utils.defaultvalue import DEFAULT_NONE
-from telegram._utils.types import JSONDict, ODVInput
+from telegram._utils.types import JSONDict
 
 if TYPE_CHECKING:
     from telegram import Bot, File
@@ -65,8 +64,13 @@ class _BaseMedium(TelegramObject):
 
         self._id_attrs = (self.file_unique_id,)
 
-    def get_file(
-        self, timeout: ODVInput[float] = DEFAULT_NONE, api_kwargs: JSONDict = None
+    async def get_file(
+        self,
+        read_timeout: float = None,
+        write_timeout: float = None,
+        connect_timeout: float = None,
+        pool_timeout: float = None,
+        api_kwargs: JSONDict = None,
     ) -> 'File':
         """Convenience wrapper over :attr:`telegram.Bot.get_file`
 
@@ -79,6 +83,11 @@ class _BaseMedium(TelegramObject):
             :class:`telegram.error.TelegramError`
 
         """
-        return self.get_bot().get_file(
-            file_id=self.file_id, timeout=timeout, api_kwargs=api_kwargs
+        return await self.get_bot().get_file(
+            file_id=self.file_id,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            connect_timeout=connect_timeout,
+            pool_timeout=pool_timeout,
+            api_kwargs=api_kwargs,
         )

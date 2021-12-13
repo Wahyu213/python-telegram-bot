@@ -18,10 +18,10 @@
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains the TypeHandler class."""
 
-from typing import Callable, Type, TypeVar, Union
+from typing import Type, TypeVar, Union
 
 from telegram.ext import Handler
-from telegram.ext._utils.types import CCT
+from telegram.ext._utils.types import CCT, HandlerCallback
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
 
 RT = TypeVar('RT')
@@ -62,7 +62,7 @@ class TypeHandler(Handler[UT, CCT]):
     def __init__(
         self,
         type: Type[UT],  # pylint: disable=redefined-builtin
-        callback: Callable[[UT, CCT], RT],
+        callback: HandlerCallback[UT, CCT, RT],
         strict: bool = False,
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ):

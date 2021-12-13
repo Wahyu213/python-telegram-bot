@@ -123,7 +123,7 @@ def done(update: Update, context: CallbackContext.DEFAULT_TYPE) -> int:
         del context.user_data['choice']
 
     update.message.reply_text(
-        f"I learned these facts about you: {facts_to_str(context.user_data)}Until next time!",
+        f"I learned these facts about you: {facts_to_str(context.user_data)} Until next time!",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END

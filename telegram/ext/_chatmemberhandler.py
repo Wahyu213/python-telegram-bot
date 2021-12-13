@@ -17,12 +17,12 @@
 # You should have received a copy of the GNU Lesser Public License
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains the ChatMemberHandler classes."""
-from typing import ClassVar, TypeVar, Union, Callable
+from typing import ClassVar, TypeVar, Union
 
 from telegram import Update
 from telegram.ext import Handler
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
-from telegram.ext._utils.types import CCT
+from telegram.ext._utils.types import CCT, HandlerCallback
 
 RT = TypeVar('RT')
 
@@ -70,7 +70,7 @@ class ChatMemberHandler(Handler[Update, CCT]):
 
     def __init__(
         self,
-        callback: Callable[[Update, CCT], RT],
+        callback: HandlerCallback[Update, CCT, RT],
         chat_member_types: int = MY_CHAT_MEMBER,
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ):

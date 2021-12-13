@@ -17,13 +17,13 @@
 # You should have received a copy of the GNU Lesser Public License
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains the MessageHandler class."""
-from typing import TYPE_CHECKING, Callable, Dict, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Dict, Optional, TypeVar, Union
 
 from telegram import Update
 from telegram.ext import filters as filters_module, Handler
 from telegram._utils.defaultvalue import DefaultValue, DEFAULT_FALSE
 
-from telegram.ext._utils.types import CCT
+from telegram.ext._utils.types import CCT, HandlerCallback
 
 if TYPE_CHECKING:
     from telegram.ext import Dispatcher
@@ -72,7 +72,7 @@ class MessageHandler(Handler[Update, CCT]):
     def __init__(
         self,
         filters: filters_module.BaseFilter,
-        callback: Callable[[Update, CCT], RT],
+        callback: HandlerCallback[Update, CCT, RT],
         run_async: Union[bool, DefaultValue] = DEFAULT_FALSE,
     ):
 

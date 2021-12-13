@@ -122,14 +122,14 @@ class TestInputFile:
             == 'blah.jpg'
         )
 
-    def test_send_bytes(self, bot, chat_id):
+    @pytest.mark.asyncio
+    async def test_send_bytes(self, bot, chat_id):
         # We test this here and not at the respective test modules because it's not worth
         # duplicating the test for the different methods
-        message = bot.send_document(chat_id, data_file('text_file.txt').read_bytes())
+        message = await bot.send_document(chat_id, data_file('text_file.txt').read_bytes())
         out = BytesIO()
 
-        assert message.document.get_file().download(out=out)
-
+        assert await (await message.document.get_file()).download(out=out)
         out.seek(0)
 
         assert out.read().decode('utf-8') == 'PTB Rocks!'

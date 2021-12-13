@@ -23,11 +23,16 @@ from typing import NoReturn, Optional, Dict, Any
 import pytz
 
 from telegram._utils.defaultvalue import DEFAULT_NONE
-from telegram._utils.types import ODVInput
 
 
 class Defaults:
     """Convenience Class to gather all parameters with a (user defined) default value
+
+    .. versionchanged:: 14.0
+        Removed the argument and attribute ``timeout``. Specify default timeout behavior for the
+        networking backend directly via :class:`telegram.ext.UpdaterBuilder` or
+        :class:`telegram.ext.DispatcherBuilder` instead.
+
 
     Parameters:
         parse_mode (:obj:`str`, optional): Send Markdown or HTML, if you want Telegram apps to show
@@ -38,12 +43,6 @@ class Defaults:
             message.
         allow_sending_without_reply (:obj:`bool`, optional): Pass :obj:`True`, if the message
             should be sent even if the specified replied-to message is not found.
-        timeout (:obj:`int` | :obj:`float`, optional): If this value is specified, use it as the
-            read timeout from the server (instead of the one specified during creation of the
-            connection pool).
-
-            Note:
-                Will *not* be used for :meth:`telegram.Bot.get_updates`!
         quote (:obj:`bool`, optional): If set to :obj:`True`, the reply is sent as an actual reply
             to the message. If ``reply_to_message_id`` is passed in ``kwargs``, this parameter will
             be ignored. Default: :obj:`True` in group chats and :obj:`False` in private chats.
@@ -57,7 +56,6 @@ class Defaults:
     """
 
     __slots__ = (
-        '_timeout',
         '_tzinfo',
         '_disable_web_page_preview',
         '_run_async',
@@ -73,9 +71,6 @@ class Defaults:
         parse_mode: str = None,
         disable_notification: bool = None,
         disable_web_page_preview: bool = None,
-        # Timeout needs special treatment, since the bot methods have two different
-        # default values for timeout (None and 20s)
-        timeout: ODVInput[float] = DEFAULT_NONE,
         quote: bool = None,
         tzinfo: pytz.BaseTzInfo = pytz.utc,
         run_async: bool = False,
@@ -85,7 +80,6 @@ class Defaults:
         self._disable_notification = disable_notification
         self._disable_web_page_preview = disable_web_page_preview
         self._allow_sending_without_reply = allow_sending_without_reply
-        self._timeout = timeout
         self._quote = quote
         self._tzinfo = tzinfo
         self._run_async = run_async
@@ -102,9 +96,6 @@ class Defaults:
             value = getattr(self, kwarg)
             if value not in [None, DEFAULT_NONE]:
                 self._api_defaults[kwarg] = value
-        # Special casing, as None is a valid default value
-        if self._timeout != DEFAULT_NONE:
-            self._api_defaults['timeout'] = self._timeout
 
     @property
     def api_defaults(self) -> Dict[str, Any]:  # skip-cq: PY-D0003
@@ -174,18 +165,6 @@ class Defaults:
         )
 
     @property
-    def timeout(self) -> ODVInput[float]:
-        """:obj:`int` | :obj:`float`: Optional. If this value is specified, use it as the
-        read timeout from the server (instead of the one specified during creation of the
-        connection pool).
-        """
-        return self._timeout
-
-    @timeout.setter
-    def timeout(self, value: object) -> NoReturn:
-        raise AttributeError("You can not assign a new value to timeout after initialization.")
-
-    @property
     def quote(self) -> Optional[bool]:
         """:obj:`bool`: Optional. If set to :obj:`True`, the reply is sent as an actual reply
         to the message. If ``reply_to_message_id`` is passed in ``kwargs``, this parameter will
@@ -227,7 +206,6 @@ class Defaults:
                 self._disable_notification,
                 self._disable_web_page_preview,
                 self._allow_sending_without_reply,
-                self._timeout,
                 self._quote,
                 self._tzinfo,
                 self._run_async,
