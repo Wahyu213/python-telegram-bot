@@ -346,7 +346,7 @@ class Bot(TelegramObject, AbstractAsyncContextManager):
         """Stop & clear resources used by this class. Currently just calls
         :meth:`telegram.request.BaseRequest.stop` for :attr:`request`.
         """
-        await self.request.stop()
+        await self.request.shutdown()
 
     async def __aenter__(self: BT) -> BT:
         try:

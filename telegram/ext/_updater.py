@@ -23,7 +23,7 @@ import logging
 import signal
 from fileinput import FileInput
 from pathlib import Path
-from threading import Lock
+from types import TracebackType
 from typing import (
     Any,
     Callable,
@@ -35,6 +35,8 @@ from typing import (
     TYPE_CHECKING,
     Coroutine,
     Tuple,
+    Type,
+    no_type_check,
 )
 
 from telegram.error import InvalidToken, RetryAfter, TimedOut, Forbidden, TelegramError
@@ -47,10 +49,11 @@ if TYPE_CHECKING:
     from telegram.ext._builders import InitUpdaterBuilder
 
 
-DT = TypeVar('DT', bound=Union[None, Dispatcher])
+_DispType = TypeVar('_DispType', bound=Union[None, Dispatcher])
+_UpdaterType = TypeVar('_UpdaterType', bound="Updater")
 
 
-class Updater(Generic[BT, DT]):
+class Updater(Generic[BT, _DispType]):
     """
     This class, which employs the :class:`telegram.ext.Dispatcher`, provides a frontend to
     :class:`telegram.Bot` to the programmer, so they can focus on coding the bot. Its purpose is to
@@ -82,7 +85,6 @@ class Updater(Generic[BT, DT]):
         update_queue (:class:`asyncio.Queue`): Queue for the updates.
         dispatcher (:class:`telegram.ext.Dispatcher`): Optional. Dispatcher that handles the
             updates and dispatches them to the handlers.
-        running (:obj:`bool`): Indicates if the updater is running.
 
     """
 
@@ -90,21 +92,21 @@ class Updater(Generic[BT, DT]):
         'dispatcher',
         'user_signal_handler',
         'bot',
-        'logger',
+        '_logger',
         'update_queue',
         'last_update_id',
-        'running',
-        'is_idle',
+        '_has_stopped_fetching',
+        '_running',
         'httpd',
         '__lock',
         '__asyncio_tasks',
     )
 
     def __init__(
-        self: 'Updater[BT, DT]',
+        self: 'Updater[BT, _DispType]',
         *,
         user_signal_handler: Callable[[int, object], Any] = None,
-        dispatcher: DT = None,
+        dispatcher: _DispType = None,
         bot: BT = None,
         update_queue: asyncio.Queue = None,
     ):
@@ -126,12 +128,13 @@ class Updater(Generic[BT, DT]):
             self.update_queue = update_queue
 
         self.last_update_id = 0
-        self.running = False
-        self.is_idle = False
+        self._running = False
+        self._has_stopped_fetching = asyncio.Event()
+        self._has_stopped_fetching.set()
         self.httpd = None
-        self.__lock = Lock()
+        self.__lock = asyncio.Lock()
         self.__asyncio_tasks: List[asyncio.Task] = []
-        self.logger = logging.getLogger(__name__)
+        self._logger = logging.getLogger(__name__)
 
     @staticmethod
     def builder() -> 'InitUpdaterBuilder':
@@ -144,37 +147,62 @@ class Updater(Generic[BT, DT]):
 
         return UpdaterBuilder()
 
+    @property
+    def running(self) -> bool:
+        return self._running
+
     async def initialize(self) -> None:
         if self.dispatcher:
-            await self.dispatcher.start()
+            await self.dispatcher.initialize()
         else:
             await self.bot.initialize()
 
     async def shutdown(self) -> None:
         if self.dispatcher:
-            self.logger.debug('Requesting Dispatcher to stop...')
-            await self.dispatcher.stop()
+            self._logger.debug('Requesting Dispatcher to shut down ...')
+            await self.dispatcher.shutdown()
         else:
             await self.bot.shutdown()
+        self._logger.debug('Shut down of Updater complete')
+
+    async def __aenter__(self: _UpdaterType) -> _UpdaterType:
+        try:
+            await self.initialize()
+            return self
+        except Exception as exc:
+            await self.shutdown()
+            raise exc
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
+        # Make sure not to return `True` so that exceptions are not suppressed
+        # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
+        await self.shutdown()
 
     def _init_task(
         self, target: Callable[..., Coroutine], name: str, *args: object, **kwargs: object
     ) -> None:
         task = asyncio.create_task(
-            coro=self._thread_wrapper(target, *args, **kwargs),
-            # name=f"Bot:{self.bot.id}:{name}",
+            coro=self._task_wrapper(target, name, *args, **kwargs),
+            # TODO: Add this once we drop py3.7
+            name=f"Updater:{self.bot.id}:{name}",
         )
         self.__asyncio_tasks.append(task)
 
-    async def _thread_wrapper(self, target: Callable, *args: object, **kwargs: object) -> None:
-        task_name = '# FIXME'
-        self.logger.debug('%s - started', task_name)
+    async def _task_wrapper(
+        self, target: Callable, name: str, *args: object, **kwargs: object
+    ) -> None:
+        self._logger.debug('%s - started', name)
         try:
             await target(*args, **kwargs)
         except Exception:
-            self.logger.exception('unhandled exception in %s', task_name)
+            self._logger.exception('unhandled exception in %s', name)
             raise
-        self.logger.debug('%s - ended', task_name)
+        self._logger.debug('%s - ended', name)
 
     # TODO: Probably drop `pool_connect` timeout again, because we probably want to just make
     #       sure that `getUpdates` always gets a connection without waiting
@@ -189,7 +217,7 @@ class Updater(Generic[BT, DT]):
         pool_timeout: float = None,
         allowed_updates: List[str] = None,
         drop_pending_updates: bool = None,
-    ) -> Optional[asyncio.Queue]:
+    ) -> asyncio.Queue:
         """Starts polling updates from Telegram.
 
         .. versionchanged:: 14.0
@@ -220,38 +248,43 @@ class Updater(Generic[BT, DT]):
             :class:`asyncio.Queue`: The update queue that can be filled from the main thread.
 
         """
-        with self.__lock:
-            if not self.running:
-                self.running = True
-
-                # Create & start threads
-                dispatcher_ready = asyncio.Event()
-                polling_ready = asyncio.Event()
-
-                self._init_task(
-                    self._start_polling,
-                    "updater",
-                    poll_interval,
-                    timeout,
-                    read_timeout,
-                    write_timeout,
-                    connect_timeout,
-                    pool_timeout,
-                    bootstrap_retries,
-                    drop_pending_updates,
-                    allowed_updates,
-                    ready=polling_ready,
-                )
-
-                self.logger.debug('Waiting for polling to start')
-                await polling_ready.wait()
-                # if self.dispatcher:
-                #     self.logger.debug('Waiting for Dispatcher to start')
-                #     await dispatcher_ready.wait()
-
-                # Return the update queue so the main thread can insert updates
+        async with self.__lock:
+            if self.running:
                 return self.update_queue
-            return None
+
+            self._has_stopped_fetching.clear()
+            self._running = True
+
+            # Create & start tasks
+            dispatcher_ready = asyncio.Event()
+            polling_ready = asyncio.Event()
+
+            if self.dispatcher:
+                self.dispatcher.start(ready=dispatcher_ready)
+
+            self._init_task(
+                self._start_polling,
+                "Polling Background task",
+                poll_interval,
+                timeout,
+                read_timeout,
+                write_timeout,
+                connect_timeout,
+                pool_timeout,
+                bootstrap_retries,
+                drop_pending_updates,
+                allowed_updates,
+                ready=polling_ready,
+            )
+
+            self._logger.debug('Waiting for polling to start')
+            await polling_ready.wait()
+            if self.dispatcher:
+                self._logger.debug('Waiting for Dispatcher to start')
+                await dispatcher_ready.wait()
+                self._logger.debug('Dispatcher started')
+
+            return self.update_queue
 
     async def _start_polling(
         self,
@@ -266,11 +299,11 @@ class Updater(Generic[BT, DT]):
         allowed_updates: Optional[List[str]],
         ready: asyncio.Event = None,
     ) -> None:
-        # Thread target of thread 'updater.start_polling()'. Runs in background, pulls
+        # Target of task 'updater.start_polling()'. Runs in background, pulls
         # updates from Telegram and inserts them in the update queue of the
         # Dispatcher.
 
-        self.logger.debug('Updater thread started (polling)')
+        self._logger.debug('Updater started (polling)')
 
         await self._bootstrap(
             bootstrap_retries,
@@ -279,7 +312,7 @@ class Updater(Generic[BT, DT]):
             allowed_updates=None,
         )
 
-        self.logger.debug('Bootstrap done')
+        self._logger.debug('Bootstrap done')
 
         async def polling_action_cb() -> bool:
             updates = await self.bot.get_updates(
@@ -294,7 +327,7 @@ class Updater(Generic[BT, DT]):
 
             if updates:
                 if not self.running:
-                    self.logger.debug('Updates ignored and will be pulled again on restart')
+                    self._logger.debug('Updates ignored and will be pulled again on restart')
                 else:
                     for update in updates:
                         await self.update_queue.put(update)
@@ -338,31 +371,36 @@ class Updater(Generic[BT, DT]):
                 `action_cb`.
 
         """
-        self.logger.debug('Start network loop retry %s', description)
+        self._logger.debug('Start network loop retry %s', description)
         cur_interval = interval
         while self.running:
             try:
-                if not await action_cb():
-                    break
-            except RetryAfter as exc:
-                self.logger.info('%s', exc)
-                cur_interval = 0.5 + exc.retry_after
-            except TimedOut as toe:
-                self.logger.debug('Timed out %s: %s', description, toe)
-                # If failure is due to timeout, we should retry asap.
-                cur_interval = 0
-            except InvalidToken as pex:
-                self.logger.error('Invalid token; aborting')
-                raise pex
-            except TelegramError as telegram_exc:
-                self.logger.error('Error while %s: %s', description, telegram_exc)
-                await onerr_cb(telegram_exc)
-                cur_interval = self._increase_poll_interval(cur_interval)
-            else:
-                cur_interval = interval
+                try:
+                    if not await action_cb():
+                        break
+                except RetryAfter as exc:
+                    self._logger.info('%s', exc)
+                    cur_interval = 0.5 + exc.retry_after
+                except TimedOut as toe:
+                    self._logger.debug('Timed out %s: %s', description, toe)
+                    # If failure is due to timeout, we should retry asap.
+                    cur_interval = 0
+                except InvalidToken as pex:
+                    self._logger.error('Invalid token; aborting')
+                    raise pex
+                except TelegramError as telegram_exc:
+                    self._logger.error('Error while %s: %s', description, telegram_exc)
+                    await onerr_cb(telegram_exc)
+                    cur_interval = self._increase_poll_interval(cur_interval)
+                else:
+                    cur_interval = interval
 
-            if cur_interval:
-                await asyncio.sleep(cur_interval)
+                if cur_interval:
+                    await asyncio.sleep(cur_interval)
+
+            except asyncio.CancelledError:
+                self._logger.debug('Network loop retry %s was cancelled', description)
+                break
 
     @staticmethod
     def _increase_poll_interval(current_interval: float) -> float:
@@ -389,16 +427,16 @@ class Updater(Generic[BT, DT]):
         retries = [0]
 
         async def bootstrap_del_webhook() -> bool:
-            self.logger.debug('Deleting webhook')
+            self._logger.debug('Deleting webhook')
             if drop_pending_updates:
-                self.logger.debug('Dropping pending updates from Telegram server')
+                self._logger.debug('Dropping pending updates from Telegram server')
             await self.bot.delete_webhook(drop_pending_updates=drop_pending_updates)
             return False
 
         async def bootstrap_set_webhook() -> bool:
-            self.logger.debug('Setting webhook')
+            self._logger.debug('Setting webhook')
             if drop_pending_updates:
-                self.logger.debug('Dropping pending updates from Telegram server')
+                self._logger.debug('Dropping pending updates from Telegram server')
             await self.bot.set_webhook(
                 url=webhook_url,
                 certificate=cert,
@@ -412,11 +450,11 @@ class Updater(Generic[BT, DT]):
         async def bootstrap_onerr_cb(exc: Exception) -> None:
             if not isinstance(exc, Forbidden) and (max_retries < 0 or retries[0] < max_retries):
                 retries[0] += 1
-                self.logger.warning(
+                self._logger.warning(
                     'Failed bootstrap phase; try=%s max_retries=%s', retries[0], max_retries
                 )
             else:
-                self.logger.error('Failed bootstrap phase after %s retries (%s)', retries[0], exc)
+                self._logger.error('Failed bootstrap phase after %s retries (%s)', retries[0], exc)
                 raise exc
 
         # Dropping pending updates from TG can be efficiently done with the drop_pending_updates
@@ -443,21 +481,25 @@ class Updater(Generic[BT, DT]):
             )
 
     async def stop_fetching_updates(self) -> None:
-        """Stops the polling/webhook thread, the dispatcher and the job queue."""
-        with self.__lock:
+        """Stops the polling/webhook, the dispatcher and the job queue."""
+        async with self.__lock:
             if self.running or (self.dispatcher and self.dispatcher.running):
-                self.logger.debug(
+                self._logger.debug(
                     'Stopping Updater %s...', 'and Dispatcher ' if self.dispatcher else ''
                 )
 
-                self.running = False
+                self._running = False
 
                 self._stop_httpd()
                 await self._join_tasks()
+                if self.dispatcher:
+                    await self.dispatcher.stop()
+
+                self._has_stopped_fetching.set()
 
     def _stop_httpd(self) -> None:
         if self.httpd:
-            self.logger.debug(
+            self._logger.debug(
                 'Waiting for current webhook connection to be '
                 'closed... Send a Telegram message to the bot to exit '
                 'immediately.'
@@ -466,13 +508,15 @@ class Updater(Generic[BT, DT]):
             self.httpd = None
 
     async def _join_tasks(self) -> None:
+        for task in self.__asyncio_tasks:
+            task.cancel()
         await asyncio.gather(*self.__asyncio_tasks)
         self.__asyncio_tasks = []
 
+    @no_type_check
     def _signal_handler(self, signum, frame) -> None:
-        self.is_idle = False
         if self.running:
-            self.logger.info(
+            self._logger.info(
                 'Received signal %s (%s), stopping...',
                 signum,
                 # signal.Signals is undocumented in py3.5-3.8, but existed nonetheless
@@ -480,11 +524,11 @@ class Updater(Generic[BT, DT]):
                 signal.Signals(signum),  # pylint: disable=no-member
             )
             asyncio.create_task(self.stop_fetching_updates())
-            asyncio.create_task(self.shutdown())
             if self.user_signal_handler:
                 self.user_signal_handler(signum, frame)
         else:
-            self.logger.warning('Exiting immediately!')
+            # TODO: Think about whether or not we still need this
+            self._logger.warning('Exiting immediately!')
             # pylint: disable=import-outside-toplevel, protected-access
             import os
 
@@ -504,7 +548,4 @@ class Updater(Generic[BT, DT]):
         for sig in stop_signals:
             signal.signal(sig, self._signal_handler)
 
-        self.is_idle = True
-
-        while self.is_idle:
-            await asyncio.sleep(1)
+        await self._has_stopped_fetching.wait()

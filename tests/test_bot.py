@@ -193,7 +193,7 @@ class TestBot:
             self.test_flag.append('stop')
 
         temp_bot = Bot(token=bot.token)
-        orig_stop = temp_bot.request.stop
+        orig_stop = temp_bot.request.shutdown
 
         try:
             monkeypatch.setattr(temp_bot.request, 'initialize', initialize)

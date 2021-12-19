@@ -24,6 +24,7 @@ from asyncio import Event
 from collections import defaultdict
 from pathlib import Path
 from threading import Lock
+from types import TracebackType
 from typing import (
     Callable,
     DefaultDict,
@@ -37,6 +38,7 @@ from typing import (
     Coroutine,
     Sequence,
     Any,
+    Type,
 )
 
 from telegram import Update
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 DEFAULT_GROUP: int = 0
 
 _UT = TypeVar('_UT')
+_DispType = TypeVar('_DispType', bound="Dispatcher")
 _PooledRT = TypeVar('_PooledRT')
 _STOP_SIGNAL = object()
 
@@ -131,10 +134,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
             .. seealso::
                 :meth:`add_error_handler`
-        running (:obj:`bool`): Indicates if this dispatcher is running.
-
-            .. seealso::
-                :meth:`start`, :meth:`stop`
 
     """
 
@@ -152,7 +151,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         'handlers',
         'groups',
         'error_handlers',
-        'running',
+        '_running',
         '__pool_semaphore',
         '__run_asyncio_task_counter',
         '__run_asyncio_task_condition',
@@ -202,54 +201,90 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         self.bot_data = self.context_types.bot_data()
         self.persistence: Optional[BasePersistence] = None
         self._update_persistence_lock = Lock()
-        if persistence:
-            if not isinstance(persistence, BasePersistence):
-                raise TypeError("persistence must be based on telegram.ext.BasePersistence")
-
-            self.persistence = persistence
-            # This raises an exception if persistence.store_data.callback_data is True
-            # but self.bot is not an instance of ExtBot - so no need to check that later on
-            self.persistence.set_bot(self.bot)
-
-            if self.persistence.store_data.user_data:
-                self.user_data = self.persistence.get_user_data()
-                if not isinstance(self.user_data, defaultdict):
-                    raise ValueError("user_data must be of type defaultdict")
-            if self.persistence.store_data.chat_data:
-                self.chat_data = self.persistence.get_chat_data()
-                if not isinstance(self.chat_data, defaultdict):
-                    raise ValueError("chat_data must be of type defaultdict")
-            if self.persistence.store_data.bot_data:
-                self.bot_data = self.persistence.get_bot_data()
-                if not isinstance(self.bot_data, self.context_types.bot_data):
-                    raise ValueError(
-                        f"bot_data must be of type {self.context_types.bot_data.__name__}"
-                    )
-            if self.persistence.store_data.callback_data:
-                persistent_data = self.persistence.get_callback_data()
-                if persistent_data is not None:
-                    if not isinstance(persistent_data, tuple) and len(persistent_data) != 2:
-                        raise ValueError('callback_data must be a 2-tuple')
-                    # Mypy doesn't know that persistence.set_bot (see above) already checks that
-                    # self.bot is an instance of ExtBot if callback_data should be stored ...
-                    self.bot.callback_data_cache = CallbackDataCache(  # type: ignore[attr-defined]
-                        self.bot,  # type: ignore[arg-type]
-                        self.bot.callback_data_cache.maxsize,  # type: ignore[attr-defined]
-                        persistent_data=persistent_data,
-                    )
-        else:
-            self.persistence = None
+        self._initialize_persistence(persistence)
 
         self.handlers: Dict[int, List[Handler]] = {}
         self.groups: List[int] = []
         self.error_handlers: Dict[Callable, Union[bool, DefaultValue]] = {}
 
         # A number of low-level helpers for the internal logic
-        self.running = False
+        self._running = False
         self.__pool_semaphore = asyncio.BoundedSemaphore(value=self.workers)
         self.__update_fetcher_task: Optional[asyncio.Task] = None
         self.__run_asyncio_task_counter = 0
         self.__run_asyncio_task_condition = asyncio.Condition()
+
+    @property
+    def running(self) -> bool:
+        """:obj:`bool`: Indicates if this dispatcher is running.
+
+        .. seealso::
+            :meth:`start`, :meth:`stop`
+        """
+        return self._running
+
+    async def initialize(self) -> None:
+        await self.bot.initialize()
+
+    async def shutdown(self) -> None:
+        await self.bot.shutdown()
+
+    async def __aenter__(self: _DispType) -> _DispType:
+        try:
+            await self.initialize()
+            return self
+        except Exception as exc:
+            await self.shutdown()
+            raise exc
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
+        # Make sure not to return `True` so that exceptions are not suppressed
+        # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
+        await self.shutdown()
+
+    def _initialize_persistence(self, persistence: Optional[BasePersistence]) -> None:
+        if not persistence:
+            return
+
+        if not isinstance(persistence, BasePersistence):
+            raise TypeError("persistence must be based on telegram.ext.BasePersistence")
+
+        self.persistence = persistence
+        # This raises an exception if persistence.store_data.callback_data is True
+        # but self.bot is not an instance of ExtBot - so no need to check that later on
+        self.persistence.set_bot(self.bot)
+
+        if self.persistence.store_data.user_data:
+            self.user_data = self.persistence.get_user_data()
+            if not isinstance(self.user_data, defaultdict):
+                raise ValueError("user_data must be of type defaultdict")
+        if self.persistence.store_data.chat_data:
+            self.chat_data = self.persistence.get_chat_data()
+            if not isinstance(self.chat_data, defaultdict):
+                raise ValueError("chat_data must be of type defaultdict")
+        if self.persistence.store_data.bot_data:
+            self.bot_data = self.persistence.get_bot_data()
+            if not isinstance(self.bot_data, self.context_types.bot_data):
+                raise ValueError(
+                    f"bot_data must be of type {self.context_types.bot_data.__name__}"
+                )
+        if self.persistence.store_data.callback_data:
+            persistent_data = self.persistence.get_callback_data()
+            if persistent_data is not None:
+                if not isinstance(persistent_data, tuple) and len(persistent_data) != 2:
+                    raise ValueError('callback_data must be a 2-tuple')
+                # Mypy doesn't know that persistence.set_bot (see above) already checks that
+                # self.bot is an instance of ExtBot if callback_data should be stored ...
+                self.bot.callback_data_cache = CallbackDataCache(  # type: ignore[attr-defined]
+                    self.bot,  # type: ignore[arg-type]
+                    self.bot.callback_data_cache.maxsize,  # type: ignore[attr-defined]
+                    persistent_data=persistent_data,
+                )
 
     async def __increment_run_asyncio_task_counter(self) -> None:
         async with self.__run_asyncio_task_condition:
@@ -361,7 +396,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
         return task
 
-    async def start(self, ready: Event = None) -> None:
+    def start(self, ready: Event = None) -> None:
         """Thread target of thread 'dispatcher'.
 
         Runs in background and processes the update queue. Also starts :attr:`job_queue`, if set.
@@ -377,12 +412,10 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 ready.set()
             return
 
-        await self.bot.initialize()
-
         self.__update_fetcher_task = asyncio.create_task(
             self._update_fetcher(), name=f'Dispatcher:{self.bot.id}:update_fetcher'
         )
-        self.running = True
+        self._running = True
         _logger.debug('Dispatcher started')
 
         if self.job_queue:
@@ -402,7 +435,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             Once this method is called, no more updates will be fetched from :attr:`update_queue`,
             even if it's not empty.
         """
-        # Only relevant if the dispatcher is running
         if self.running:
 
             # Stop listening for new updates and handle all pending ones
@@ -417,21 +449,17 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                     _logger.debug('Waiting for `run_asyncio` calls to be processed')
                     await self.__run_asyncio_task_condition.wait()
 
-            self.running = False
+            self._running = False
 
-        # Things that need to be done even if `start()` was not called
-        self.update_persistence()
-        if self.persistence:
-            self.persistence.flush()
-            _logger.debug('Updated and flushed persistence')
+            self.update_persistence()
+            if self.persistence:
+                self.persistence.flush()
+                _logger.debug('Updated and flushed persistence')
 
-        if self.job_queue:
-            _logger.debug('Waiting for running jobs to finish')
-            self.job_queue.stop(wait=True)
-            _logger.debug('JobQueue stopped')
-
-        # Shut down the bot
-        await self.bot.shutdown()
+            if self.job_queue:
+                _logger.debug('Waiting for running jobs to finish')
+                self.job_queue.stop(wait=True)
+                _logger.debug('JobQueue stopped')
 
     async def _update_fetcher(self) -> None:
         # Continuously fetch updates from the queue. Exit only once the signal object is found.
@@ -714,8 +742,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         Args:
             update (:obj:`object` | :class:`telegram.Update`): The update that caused the error.
             error (:obj:`Exception`): The error that was raised.
-            promise (:class:`telegram._utils.Promise`, optional): The promise whose pooled function
-                raised the error.
             job (:class:`telegram.ext.Job`, optional): The job that caused the error.
 
                 .. versionadded:: 14.0

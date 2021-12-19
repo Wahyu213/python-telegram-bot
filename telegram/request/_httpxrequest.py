@@ -108,7 +108,7 @@ class HTTPXRequest(BaseRequest):
     async def initialize(self) -> None:
         """See :meth:`BaseRequest.initialize`."""
 
-    async def stop(self) -> None:
+    async def shutdown(self) -> None:
         """See :meth:`BaseRequest.stop`."""
         await self._client.aclose()
 

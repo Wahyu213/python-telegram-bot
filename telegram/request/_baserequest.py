@@ -18,6 +18,7 @@
 # along with this program.  If not, see [http://www.gnu.org/licenses/].
 """This module contains an abstract class to make POST and GET requests."""
 import abc
+import traceback
 from contextlib import AbstractAsyncContextManager
 from http import HTTPStatus
 from types import TracebackType
@@ -91,7 +92,7 @@ class BaseRequest(
             await self.initialize()
             return self
         except Exception as exc:
-            await self.stop()
+            await self.shutdown()
             raise exc
 
     async def __aexit__(
@@ -102,14 +103,14 @@ class BaseRequest(
     ) -> None:
         # Make sure not to return `True` so that exceptions are not suppressed
         # https://docs.python.org/3/reference/datamodel.html?#object.__aexit__
-        await self.stop()
+        await self.shutdown()
 
     @abc.abstractmethod
     async def initialize(self) -> None:
         """Initialize resources used by this class. Must be implemented by a subclass."""
 
     @abc.abstractmethod
-    async def stop(self) -> None:
+    async def shutdown(self) -> None:
         """Stop & clear resources used by this class. Must be implemented by a subclass."""
 
     async def post(
@@ -243,7 +244,8 @@ class BaseRequest(
         except TelegramError as exc:
             raise exc
         except Exception as exc:
-            raise NetworkError(f"Unknown error in HTTP implementation: {exc}") from exc
+            traceback.print_tb(exc.__traceback__)
+            raise NetworkError(f"Unknown error in HTTP implementation: {repr(exc)}") from exc
 
         if HTTPStatus.OK <= code <= 299:
             # 200-299 range are HTTP success statuses

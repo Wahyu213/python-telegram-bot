@@ -272,7 +272,7 @@ class TestRequest:
             async def initialize(self, *args, **kwargs):
                 pass
 
-            async def stop(self, *args, **kwargs):
+            async def shutdown(self, *args, **kwargs):
                 pass
 
         with pytest.raises(NotImplementedError):

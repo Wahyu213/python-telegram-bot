@@ -22,7 +22,6 @@ We mainly test on UpdaterBuilder because it has all methods that DispatcherBuild
 """
 from pathlib import Path
 from random import randint
-from threading import Event
 
 import pytest
 
