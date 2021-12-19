@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast, overload
 #  2. Think about refactoring. `Job.__call__` was introduced in
 #     https://github.com/python-telegram-bot/python-telegram-bot/pull/2692
 #     but there are probably feasible alternatives.
-from telegram._utils.asyncio import is_coroutine_function
+from telegram._utils.asyncio import is_coroutine_function, run_non_blocking
 from apscheduler import util
 
 util.iscoroutinefunction = is_coroutine_function
@@ -543,10 +543,10 @@ class Job:
                 with.
         """
         try:
-            if is_coroutine_function(self.callback):
-                await self.callback(dispatcher.context_types.context.from_job(self, dispatcher))
-            else:
-                self.callback(dispatcher.context_types.context.from_job(self, dispatcher))
+            await run_non_blocking(
+                func=self.callback,
+                args=(dispatcher.context_types.context.from_job(self, dispatcher),),
+            )
         except Exception as exc:
             await dispatcher.dispatch_error(None, exc, job=self)
         finally:

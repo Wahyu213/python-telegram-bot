@@ -26,13 +26,18 @@ Warning:
     the changelog.
 """
 import asyncio
+import functools
 import sys
 from functools import partial
+from typing import TypeVar, Callable, Sequence, Dict, Any, Union, Coroutine, cast
 
 if sys.version_info >= (3, 8):
     _MANUAL_UNWRAP = False
 else:
     _MANUAL_UNWRAP = True
+
+
+_RT = TypeVar('_RT')
 
 
 # TODO Remove this once we drop Py3.7
@@ -67,3 +72,31 @@ def is_coroutine_function(obj: object) -> bool:
     return asyncio.iscoroutinefunction(obj) or (
         hasattr(obj, "__call__") and asyncio.iscoroutinefunction(obj.__call__)
     )
+
+
+async def run_non_blocking(
+    func: Callable[..., Union[_RT, Coroutine[Any, Any, _RT]]],
+    args: Sequence[object] = None,
+    kwargs: Dict[str, object] = None,
+) -> _RT:
+    """Runs ``func`` such that it doesn't block. This
+
+    * for ``async`` functions the result is ``await`` ed
+    * synchronous functions are run in the current event loops default executor - a thread pool
+
+    Args:
+        func: The function
+        args: Optional. positional arguments as sequence
+        kwargs: Optional. keyword arguments as dict
+    """
+    effective_args = args or ()
+    effective_kwargs = kwargs or {}
+
+    if not is_coroutine_function(func):
+        func = cast(Callable[..., _RT], func)
+        return await asyncio.get_event_loop().run_in_executor(
+            executor=None, func=functools.partial(func, *effective_args, **effective_kwargs)
+        )
+
+    func = cast(Callable[..., Coroutine[Any, Any, _RT]], func)
+    return await func(*effective_args, **effective_kwargs)

@@ -42,6 +42,7 @@ from typing import (
 )
 
 from telegram import Update
+from telegram._utils.asyncio import run_non_blocking
 from telegram.error import TelegramError
 from telegram.ext import BasePersistence, ContextTypes, ExtBot
 from telegram.ext._handler import Handler
@@ -152,7 +153,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         'groups',
         'error_handlers',
         '_running',
-        '__pool_semaphore',
         '__run_asyncio_task_counter',
         '__run_asyncio_task_condition',
         '__update_fetcher_task',
@@ -185,7 +185,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
         self.job_queue = job_queue
         self.workers = workers
         self.context_types = context_types
-        self.process_asyncio = False
+        self.process_asyncio = True
 
         if self.job_queue:
             self.job_queue.set_dispatcher(self)
@@ -209,7 +209,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
         # A number of low-level helpers for the internal logic
         self._running = False
-        self.__pool_semaphore = asyncio.BoundedSemaphore(value=self.workers)
         self.__update_fetcher_task: Optional[asyncio.Task] = None
         self.__run_asyncio_task_counter = 0
         self.__run_asyncio_task_condition = asyncio.Condition()
@@ -309,27 +308,25 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
     async def __pooled_wrapper(
         self,
-        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
-        args: Sequence[object],
-        kwargs: Dict[str, object],
-        update: Optional[object],
-    ) -> Optional[_PooledRT]:
-        # Use the semaphore to throttle the number of tasks running in parallel
-        async with self.__pool_semaphore:
-            try:
-                return await self._pooled(func=func, args=args, kwargs=kwargs, update=update)
-            finally:
-                await self.__decrement_run_asyncio_task_counter()
-
-    async def _pooled(
-        self,
-        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
+        func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
         args: Sequence[object],
         kwargs: Dict[str, object],
         update: Optional[object],
     ) -> Optional[_PooledRT]:
         try:
-            result = await func(*args, **kwargs)
+            return await self._pooled(func=func, args=args, kwargs=kwargs, update=update)
+        finally:
+            await self.__decrement_run_asyncio_task_counter()
+
+    async def _pooled(
+        self,
+        func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
+        args: Sequence[object],
+        kwargs: Dict[str, object],
+        update: Optional[object],
+    ) -> Optional[_PooledRT]:
+        try:
+            result = await run_non_blocking(func=func, args=args, kwargs=kwargs)
 
             self.update_persistence(update=update)
             return result
@@ -356,9 +353,9 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             await self.dispatch_error(update, exception, asyncio_args=args, asyncio_kwargs=kwargs)
             return None
 
-    async def run_asyncio(
+    async def run_async(
         self,
-        func: Callable[..., Coroutine[Any, Any, _PooledRT]],
+        func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
         *args: object,
         update: object = None,
         **kwargs: object,
@@ -443,10 +440,10 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 await self.__update_fetcher_task
             _logger.debug("Dispatcher stopped fetching of updates.")
 
-            # Wait for pending `run_asyncio` tasks
+            # Wait for pending `run_async` tasks
             async with self.__run_asyncio_task_condition:
                 if self.__run_asyncio_task_counter > 0:
-                    _logger.debug('Waiting for `run_asyncio` calls to be processed')
+                    _logger.debug('Waiting for `run_async` calls to be processed')
                     await self.__run_asyncio_task_condition.wait()
 
             self._running = False
@@ -477,7 +474,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 else:
                     await self.__process_update_wrapper(update)
             except Exception as exc:
-                _logger.exception('updater fetcher got exeception', exc_info=exc)
+                _logger.exception('updater fetcher got exception', exc_info=exc)
 
     async def __process_update_wrapper(self, update: object) -> None:
         await self.process_update(update)
@@ -498,11 +495,6 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 The update to process.
 
         """
-        # Use the semaphore to throttle the number of tasks running in parallel
-        async with self.__pool_semaphore:
-            return await self.__process_update(update)
-
-    async def __process_update(self, update: object) -> None:
         # An error happened while polling
         if isinstance(update, TelegramError):
             await self.dispatch_error(None, update)
@@ -765,7 +757,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                     job=job,
                 )
                 if run_async:
-                    await self.run_asyncio(callback, update, context, update=update)
+                    await self.run_async(callback, update, context, update=update)
                 else:
                     try:
                         await callback(update, context)
