@@ -42,6 +42,13 @@ from telegram.error import TimedOut, NetworkError
 from telegram.request import BaseRequest, RequestData
 
 
+# Note to future devs:
+# Proxies are currently only tested manually. The httpx development docs have a nice guide on that:
+# https://www.python-httpx.org/contributing/#development-proxy-setup (also saved on archive.org)
+# That also works with socks5. Just pass `--mode socks5` to mitmproxy and the `verify` argument to
+# AsyncProxyTransport.from_url
+
+
 class HTTPXRequest(BaseRequest):
     """Implementation of :class`BaseRequest` using the library
     `httpx <https://www.python-httpx.org>`_`.
@@ -89,7 +96,24 @@ class HTTPXRequest(BaseRequest):
             max_connections=connection_pool_size, max_keepalive_connections=connection_pool_size
         )
 
-        # only use `proxy_url` if not `None`
+        # Handle socks5 proxies
+        if proxy_url and proxy_url.startswith('socks'):
+            try:
+                from httpx_socks import (  # pylint: disable=import-outside-toplevel
+                    AsyncProxyTransport,
+                )
+
+                transport = AsyncProxyTransport.from_url(
+                    proxy_url,
+                )
+                proxy_url = None
+            except ImportError as exc:
+                raise RuntimeError(
+                    'Requirements missing for Socks5 support. Install PTB via '
+                    '`pip install python-telegram-bot[socks]`.'
+                ) from exc
+        else:
+            transport = None
 
         # TODO p0: Test client with proxy!
         # TODO p2: Document that this can also be specified via env vars
@@ -98,6 +122,7 @@ class HTTPXRequest(BaseRequest):
             timeout=timeout,
             proxies=proxy_url,
             limits=limits,
+            transport=transport,
         )
 
     @property

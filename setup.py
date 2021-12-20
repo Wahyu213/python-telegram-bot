@@ -72,7 +72,7 @@ def get_setup_kwargs(raw=False):
         install_requires=requirements,
         extras_require={
             'json': 'ujson',
-            'socks': 'PySocks',
+            'socks': 'httpx-socks[asyncio]~=0.7.2',
             # 3.4-3.4.3 contained some cyclical import bugs
             'passport': 'cryptography!=3.4,!=3.4.1,!=3.4.2,!=3.4.3',
         },
