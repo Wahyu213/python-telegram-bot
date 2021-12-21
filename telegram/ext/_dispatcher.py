@@ -309,8 +309,8 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
     async def __pooled_wrapper(
         self,
         func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
-        args: Sequence[object],
-        kwargs: Dict[str, object],
+        args: Optional[Sequence[object]],
+        kwargs: Optional[Dict[str, object]],
         update: Optional[object],
     ) -> Optional[_PooledRT]:
         try:
@@ -321,14 +321,12 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
     async def _pooled(
         self,
         func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
-        args: Sequence[object],
-        kwargs: Dict[str, object],
+        args: Optional[Sequence[object]],
+        kwargs: Optional[Dict[str, object]],
         update: Optional[object],
     ) -> Optional[_PooledRT]:
         try:
             result = await run_non_blocking(func=func, args=args, kwargs=kwargs)
-
-            self.update_persistence(update=update)
             return result
 
         except Exception as exception:
@@ -356,9 +354,9 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
     async def run_async(
         self,
         func: Callable[..., Union[_PooledRT, Coroutine[Any, Any, _PooledRT]]],
-        *args: object,
+        args: Sequence[object] = None,
+        kwargs: Dict[str, object] = None,
         update: object = None,
-        **kwargs: object,
     ) -> 'asyncio.Task[Optional[_PooledRT]]':
         """
         Queue a function (with given args/kwargs) to be run asynchronously. Exceptions raised
@@ -371,13 +369,16 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             * Calling a function through :meth:`run_async` from within an error handler can lead to
               an infinite error handling loop.
 
+        .. versionchanged:: 14.0
+            (Keyword) arguments for ``func`` are no passed as tuple and dictionary, respectively.
+
         Args:
             func (:obj:`callable`): The function to run in the thread.
-            *args (:obj:`tuple`, optional): Arguments to ``func``.
+            args (:obj:`tuple`, optional): Arguments to ``func``.
             update (:class:`telegram.Update` | :obj:`object`, optional): The update associated with
                 the functions call. If passed, it will be available in the error handlers, in case
                 an exception is raised by :attr:`func`.
-            **kwargs (:obj:`dict`, optional): Keyword arguments to ``func``.
+            kwargs (:obj:`dict`, optional): Keyword arguments to ``func``.
 
         Returns:
             Promise
@@ -448,8 +449,8 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
 
             self._running = False
 
-            self.update_persistence()
             if self.persistence:
+                self.update_persistence()
                 self.persistence.flush()
                 _logger.debug('Updated and flushed persistence')
 
@@ -483,11 +484,10 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
     async def process_update(self, update: object) -> None:
         """Processes a single update and updates the persistence.
 
-        Note:
-            If the update is handled by least one synchronously running handlers (i.e.
-            ``run_async=False``), :meth:`update_persistence` is called *once* after all handlers
-            synchronous handlers are done. Each asynchronously running handler will trigger
-            :meth:`update_persistence` on its own.
+        .. versionchanged:: 14.0
+            This calls :meth:`update_persistence` exactly once for after handling of the update was
+            finished by *all* handlers that handled the update, including asynchronously running
+            handlers.
 
         Args:
             update (:class:`telegram.Update` | :obj:`object` | \
@@ -501,8 +501,8 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             return
 
         context = None
-        handled = False
-        sync_modes = []
+        was_handled = False
+        async_tasks: List[asyncio.Task] = []
 
         for group in self.groups:
             try:
@@ -512,15 +512,15 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                         if not context:
                             context = self.context_types.context.from_update(update, self)
                             context.refresh_data()
-                        handled = True
-                        sync_modes.append(handler.run_async)
-                        await handler.handle_update(update, self, check, context)
+                        out = await handler.handle_update(update, self, check, context)
+                        was_handled = True
+                        if isinstance(out, asyncio.Task):
+                            async_tasks.append(out)
                         break
 
             # Stop processing with any other handler.
             except DispatcherHandlerStop:
                 _logger.debug('Stopping further handlers due to DispatcherHandlerStop')
-                self.update_persistence(update=update)
                 break
 
             # Dispatch any error.
@@ -530,18 +530,11 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                     break
 
         # Update persistence, if handled
-        handled_only_async = all(sync_modes)
-        if handled:
-            # Respect default settings
-            if (
-                all(mode is DEFAULT_FALSE for mode in sync_modes)
-                and isinstance(self.bot, ExtBot)
-                and self.bot.defaults
-            ):
-                handled_only_async = self.bot.defaults.run_async
-            # If update was only handled by async handlers, we don't need to update here
-            if not handled_only_async:
-                self.update_persistence(update=update)
+        await self.run_async(
+            self._update_persistence_after_handling,  # type: ignore[arg-type]
+            update=update,
+            kwargs=dict(was_handled=was_handled, tasks=async_tasks, update=update),
+        )
 
     def add_handler(self, handler: Handler[_UT, CCT], group: int = DEFAULT_GROUP) -> None:
         """Register a handler.
@@ -614,6 +607,24 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                 del self.handlers[group]
                 self.groups.remove(group)
 
+    async def _update_persistence_after_handling(
+        self, update: object, was_handled: bool, tasks: Sequence[asyncio.Task]
+    ) -> None:
+        """Updates the persistence, if necessary, after handling of the update is finished.
+
+        Args:
+            update: The update
+            was_handled: Whether the update was handled at all, by any handler
+            tasks: Any tasks that should finish before the persistence is updated, usually the
+                tasks returned by handlers with run_async=True
+
+        """
+        if not was_handled:
+            return
+
+        await asyncio.gather(*tasks)
+        self.update_persistence(update=update)
+
     def update_persistence(self, update: object = None) -> None:
         """Update :attr:`user_data`, :attr:`chat_data` and :attr:`bot_data` in :attr:`persistence`.
 
@@ -625,6 +636,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
             self.__update_persistence(update)
 
     def __update_persistence(self, update: object = None) -> None:
+        _logger.warning("UPDATING THE PERSISTENCE FOR %s", update)
         if self.persistence:
             # We use list() here in order to decouple chat_ids from self.chat_data, as dict view
             # objects will change, when the dict does and we want to loop over chat_ids
@@ -757,7 +769,7 @@ class Dispatcher(Generic[BT, CCT, UD, CD, BD, JQ, PT]):
                     job=job,
                 )
                 if run_async:
-                    await self.run_async(callback, update, context, update=update)
+                    await self.run_async(callback, args=(update, context), update=update)
                 else:
                     try:
                         await callback(update, context)

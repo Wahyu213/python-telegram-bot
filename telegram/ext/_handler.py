@@ -122,7 +122,7 @@ class Handler(Generic[UT, CCT], ABC):
 
         self.collect_additional_context(context, update, dispatcher, check_result)
         if run_async:
-            return await dispatcher.run_async(self.callback, update, context, update=update)
+            return await dispatcher.run_async(self.callback, args=(update, context), update=update)
 
         return await run_non_blocking(
             func=self.callback,
