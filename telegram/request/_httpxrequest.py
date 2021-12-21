@@ -57,7 +57,16 @@ class HTTPXRequest(BaseRequest):
         connection_pool_size (:obj:`int`, optional): Number of connections to keep in the
             connection pool. Default to :obj:`1`.
         proxy_url (:obj:`str`, optional): The URL to the proxy server. For example
-            ``'http://127.0.0.1:3128'``. Defaults to :obj:`None`.
+            ``'http://127.0.0.1:3128'`` or ``'socks5://127.0.0.1:3128'``. Defaults to :obj:`None`.
+
+            Note:
+                * The proxy URL can also be set via the environment variables ``HTTPS_PROXY`` or
+                  ``ALL_PROXY``. See `the docs`_ of ``httpx`` for more info.
+                * For Socks5 support, additional dependencies are required. Make sure to install
+                  PTB via ``pip install python-telegram-bot[socks]`` in this case.
+                * Socks5 proxies can not be set via environment variables.
+
+            .. _the docs: https://www.python-httpx.org/environment_variables/#proxies
         connect_timeout (:obj:`float`, optional): The maximum amount of time (in seconds) to wait
             for a connection attempt to a server to succeed. :obj:`None` will set an infinite
             timeout for connection attempts. Defaults to ``5.0``.
@@ -115,9 +124,6 @@ class HTTPXRequest(BaseRequest):
         else:
             transport = None
 
-        # TODO p0: Test client with proxy!
-        # TODO p2: Document that this can also be specified via env vars
-        #          https://www.python-httpx.org/advanced/#environment-variables
         self._client = httpx.AsyncClient(
             timeout=timeout,
             proxies=proxy_url,
